@@ -132,7 +132,8 @@ processInput cmd orig inputs
                                return (Just inputs)
             Right Quit -> do when (not quiet) (iputStrLn "Bye bye")
                              return Nothing
-            Right cmd  -> do idrisCatch (process fn cmd)
+            Right cmd  -> do idrisCatch (do xs <- process fn cmd
+                                            mapM_ iputStrLn xs)
                                         (\e -> iputStrLn (show e))
                              return (Just inputs)
 
@@ -184,25 +185,25 @@ proofs orig
 
 insertScript :: String -> [String] -> [String]
 insertScript prf [] = "\n---------- Proofs ----------" : "" : [prf]
-insertScript prf (p@"---------- Proofs ----------" : "" : xs) 
+insertScript prf (p@"---------- Proofs ----------" : "" : xs)
     = p : "" : prf : xs
 insertScript prf (x : xs) = x : insertScript prf xs
 
-process :: FilePath -> Command -> Idris ()
-process fn Help = iputStrLn displayHelp
+process :: FilePath -> Command -> Idris ([String])
+process fn Help = return [displayHelp]
 process fn (ChangeDirectory f)
                  = do liftIO $ setCurrentDirectory f
-                      return ()
-process fn (Eval t) 
+                      return ([])
+process fn (Eval t)
                  = do (tm, ty) <- elabVal toplevel False t
                       ctxt <- getContext
-                      ist <- getIState 
+                      ist <- getIState
                       let tm' = normaliseAll ctxt [] tm
                       let ty' = normaliseAll ctxt [] ty
                       logLvl 3 $ "Raw: " ++ show (tm', ty')
                       imp <- impShow
-                      iputStrLn (showImp imp (delab ist tm') ++ " : " ++ 
-                                 showImp imp (delab ist ty'))
+                      return [showImp imp (delab ist tm') ++ " : " ++
+                              showImp imp (delab ist ty')]
 process fn (ExecVal t)
                   = do ctxt <- getContext
                        ist <- getIState
@@ -211,98 +212,96 @@ process fn (ExecVal t)
                        let ty' = normaliseAll ctxt [] ty
                        res <- execute tm
                        imp <- impShow
-                       iputStrLn (showImp imp (delab ist res) ++ " : " ++
-                                  showImp imp (delab ist ty'))
-                       return ()
+                       return [showImp imp (delab ist res) ++ " : " ++
+                               showImp imp (delab ist ty')]
 process fn (Check (PRef _ n))
    = do ctxt <- getContext
         ist <- getIState
         imp <- impShow
         case lookupNames n ctxt of
-             ts@(_:_) -> mapM_ (\n -> iputStrLn $ show n ++ " : " ++
-                                        showImp imp (delabTy ist n)) ts
-             [] -> iputStrLn $ "No such variable " ++ show n
+             ts@(_:_) -> return (map (\t -> show n ++ " : " ++
+                                            showImp imp (delabTy ist t)) ts)
+             [] -> return ["No such variable " ++ show n]
 process fn (Check t) = do (tm, ty) <- elabVal toplevel False t
                           ctxt <- getContext
-                          ist <- getIState 
+                          ist <- getIState
                           imp <- impShow
                           let ty' = normaliseC ctxt [] ty
-                          iputStrLn (showImp imp (delab ist tm) ++ " : " ++ 
-                                    showImp imp (delab ist ty))
+                          return [showImp imp (delab ist tm) ++ " : " ++
+                                  showImp imp (delab ist ty)]
 
 process fn (DocStr n) = do i <- getIState
                            case lookupCtxtName n (idris_docstrings i) of
-                                [] -> iputStrLn $ "No documentation for " ++ show n
-                                ns -> mapM_ showDoc ns 
-    where showDoc (n, d) 
+                                [] -> return ["No documentation for " ++ show n]
+                                ns -> do docs <- mapM showDoc ns; return docs
+    where showDoc (n, d)
              = do doc <- getDocs n
-                  iputStrLn $ show doc
+                  return (show doc)
 process fn Universes = do i <- getIState
                           let cs = idris_constraints i
 --                        iputStrLn $ showSep "\n" (map show cs)
-                          liftIO $ print (map fst cs)
+                          let cs' = show (map fst cs)
                           let n = length cs
-                          iputStrLn $ "(" ++ show n ++ " constraints)"
+                          let out = [cs', "(" ++ show n ++ " constraints)"]
                           case ucheck cs of
-                            Error e -> iputStrLn $ pshow i e
-                            OK _ -> iputStrLn "Universes OK"
+                            Error e -> return (out ++ [pshow i e])
+                            OK _ -> return (out ++ ["Universes OK"])
+
 process fn (Defn n) = do i <- getIState
-                         iputStrLn "Compiled patterns:\n"
-                         liftIO $ print (lookupDef n (tt_ctxt i))
-                         case lookupCtxt n (idris_patdefs i) of
-                            [] -> return ()
-                            [d] -> do iputStrLn "Original definiton:\n"
-                                      mapM_ (printCase i) d
+                         let pre = "Compiled patterns:\n"
+                         let out = [pre, show (lookupDef n (tt_ctxt i))]
+                         out' <-
+                           case lookupCtxt n (idris_patdefs i) of
+                             [] -> return out
+                             [d] -> return (out ++ ["Original definiton:\n"] ++ (map (printCase i) d))
                          case lookupTotal n (tt_ctxt i) of
-                            [t] -> iputStrLn (showTotal t i)
-                            _ -> return ()
-    where printCase i (_, lhs, rhs) 
-             = do liftIO $ putStr $ showImp True (delab i lhs)
-                  liftIO $ putStr " = "
-                  liftIO $ putStrLn $ showImp True (delab i rhs)
+                            [t] -> return (out' ++ [showTotal t i])
+                            _ -> return (out')
+    where printCase i (_, lhs, rhs)
+             = showImp True (delab i lhs) ++ " = " ++ showImp True (delab i rhs)
+
 process fn (TotCheck n) = do i <- getIState
                              case lookupTotal n (tt_ctxt i) of
-                                [t] -> iputStrLn (showTotal t i)
-                                _ -> return ()
-process fn (DebugInfo n) 
+                                [t] -> return ([showTotal t i])
+                                _ -> return ([])
+process fn (DebugInfo n)
    = do i <- getIState
         let oi = lookupCtxtName n (idris_optimisation i)
-        when (not (null oi)) $ iputStrLn (show oi)
+        let ois = if (null oi) then [] else [show oi]
         let si = lookupCtxt n (idris_statics i)
-        when (not (null si)) $ iputStrLn (show si)
+        let sis = if (null si) then [] else [show si]
         let di = lookupCtxt n (idris_datatypes i)
-        when (not (null di)) $ iputStrLn (show di)
+        let dis = if (null di) then [] else [show di]
         let d = lookupDef n (tt_ctxt i)
-        when (not (null d)) $ liftIO $
-           do print (head d)
+        let ds = if (null d) then [] else [show (head d)]
         let cg = lookupCtxtName n (idris_callgraph i)
         findUnusedArgs (map fst cg)
         i <- getIState
         let cg' = lookupCtxtName n (idris_callgraph i)
         sc <- checkSizeChange n
-        iputStrLn $ "Size change: " ++ show sc
-        when (not (null cg')) $ do iputStrLn "Call graph:\n"
-                                   iputStrLn (show cg')
+        let scs = ["Size change: " ++ show sc]
+        let cgs = if (null cg') then [] else ["Call graph:", show cg']
+        return (ois ++ sis ++ dis ++ ds ++ scs ++ cgs)
 process fn (Info n) = do i <- getIState
                          case lookupCtxt n (idris_classes i) of
-                              [c] -> classInfo c
-                              _ -> iputStrLn "Not a class"
-process fn (Search t) = iputStrLn "Not implemented"
+                              [c] -> do cs <- classInfo c; return cs
+                              _ -> return ["Not a class"]
+process fn (Search t) = return ["Not implemented"]
 process fn (Spec t) = do (tm, ty) <- elabVal toplevel False t
                          ctxt <- getContext
                          ist <- getIState
                          let tm' = simplify ctxt True [] {- (idris_statics ist) -} tm
-                         iputStrLn (show (delab ist tm'))
+                         return [(show (delab ist tm'))]
 
 process fn (RmProof n')
   = do i <- getIState
        n <- resolveProof n'
        let proofs = proof_list i
        case lookup n proofs of
-            Nothing -> iputStrLn "No proof to remove"
+            Nothing -> return ["No proof to remove"]
             Just _  -> do removeProof n
                           insertMetavar n
-                          iputStrLn $ "Removed proof " ++ show n
+                          return ["Removed proof " ++ show n]
                           where
                             insertMetavar :: Name -> Idris ()
                             insertMetavar n =
@@ -332,11 +331,11 @@ process fn' (AddProof prf)
                 Just nm -> return nm
        n <- resolveProof n'
        case lookup n proofs of
-            Nothing -> iputStrLn "No proof to add"
+            Nothing -> return ["No proof to add"]
             Just p  -> do let prog' = insertScript (showProof (lit fn) n p) ls
                           liftIO $ writeFile fn (unlines prog')
                           removeProof n
-                          iputStrLn $ "Added proof " ++ show n
+                          return ["Added proof " ++ show n]
                           where ls = (lines prog)
 
 process fn (ShowProof n')
@@ -344,8 +343,8 @@ process fn (ShowProof n')
        n <- resolveProof n'
        let proofs = proof_list i
        case lookup n proofs of
-            Nothing -> iputStrLn "No proof to show"
-            Just p  -> iputStrLn $ showProof False n p
+            Nothing -> return ["No proof to show"]
+            Just p  -> return [showProof False n p]
 
 process fn (Prove n')
      = do ctxt <- getContext
@@ -360,16 +359,17 @@ process fn (Prove n')
           totcheck (FC "(input)" 0, n)
           mapM_ (\ (f,n) -> setTotality n Unchecked) (idris_totcheck i)
           mapM_ checkDeclTotality (idris_totcheck i)
+          return []
 
 process fn (HNF t)  = do (tm, ty) <- elabVal toplevel False t
                          ctxt <- getContext
                          ist <- getIState
                          let tm' = hnf ctxt [] tm
-                         iputStrLn (show (delab ist tm'))
+                         return [show (delab ist tm')]
 process fn TTShell  = do ist <- getIState
                          let shst = initState (tt_ctxt ist)
                          runShell shst
-                         return ()
+                         return []
 process fn Execute = do (m, _) <- elabVal toplevel False 
                                         (PApp fc 
                                            (PRef fc (UN "run__IO"))
@@ -380,79 +380,79 @@ process fn Execute = do (m, _) <- elabVal toplevel False
                         t <- target
                         compile t tmpn m
                         liftIO $ system tmpn
-                        return ()
-  where fc = FC "main" 0                     
-process fn (NewCompile f) 
+                        return []
+  where fc = FC "main" 0
+process fn (NewCompile f)
      = do (m, _) <- elabVal toplevel False
                       (PApp fc (PRef fc (UN "run__IO"))
                           [pexp $ PRef fc (NS (UN "main") ["Main"])])
           compileEpic f m
-  where fc = FC "main" 0                     
-process fn (Compile target f) 
+          return []
+  where fc = FC "main" 0
+process fn (Compile target f)
       = do (m, _) <- elabVal toplevel False
                        (PApp fc (PRef fc (UN "run__IO"))
                        [pexp $ PRef fc (NS (UN "main") ["Main"])])
            compile target f m
-  where fc = FC "main" 0                     
-process fn (LogLvl i) = setLogLevel i 
+           return []
+  where fc = FC "main" 0
+process fn (LogLvl i) = do setLogLevel i; return []
 -- Elaborate as if LHS of a pattern (debug command)
-process fn (Pattelab t) 
+process fn (Pattelab t)
      = do (tm, ty) <- elabVal toplevel True t
-          iputStrLn $ show tm ++ "\n\n : " ++ show ty
+          return [show tm ++ "\n\n : " ++ show ty]
 
 process fn (Missing n) = do i <- getIState
                             case lookupDef n (tt_ctxt i) of
                                 [CaseOp _ _ _ _ _ args t _ _]
                                     -> do tms <- genMissing n args t
-                                          iputStrLn (showSep "\n" (map (showImp True) tms))
-                                [] -> iputStrLn $ show n ++ " undefined"
-                                _ -> iputStrLn $ "Ambiguous name"
+                                          return (map (showImp True) tms)
+                                [] -> return [show n ++ " undefined"]
+                                _ -> return ["Ambiguous name"]
 process fn (DynamicLink l) = do i <- getIState
                                 let lib = trim l
                                 handle <- lift $ tryLoadLib lib
                                 case handle of
-                                  Nothing -> iputStrLn $ "Could not load dynamic lib \"" ++ l ++ "\""
+                                  Nothing -> return ["Could not load dynamic lib \"" ++ l ++ "\""]
                                   Just x -> do let libs = idris_dynamic_libs i
                                                putIState $ i { idris_dynamic_libs = x:libs }
+                                               return []
     where trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 process fn ListDynamic = do i <- getIState
-                            iputStrLn "Dynamic libraries:"
-                            showLibs $ idris_dynamic_libs i
-    where showLibs []                = return ()
-          showLibs ((Lib name _):ls) = do iputStrLn $ "\t" ++ name; showLibs ls
+                            return ("Dynamic libraries:" : showLibs (idris_dynamic_libs i))
+    where showLibs []                = []
+          showLibs ((Lib name _):ls) = ("\t" ++ name) : showLibs ls
 process fn Metavars
                  = do ist <- getIState
                       let mvs = idris_metavars ist \\ primDefs
                       case mvs of
-                        [] -> iputStrLn "No global metavariables to solve"
-                        _ -> iputStrLn $ "Global metavariables:\n\t" ++ show mvs
-process fn NOP      = return ()
+                        [] -> return ["No global metavariables to solve"]
+                        _ -> return ["Global metavariables:\n\t" ++ show mvs]
 
-process fn (SetOpt   ErrContext) = setErrContext True
-process fn (UnsetOpt ErrContext) = setErrContext False
-process fn (SetOpt ShowImpl)     = setImpShow True
-process fn (UnsetOpt ShowImpl)   = setImpShow False
+process fn NOP      = do return []
 
-process fn (SetOpt _) = iputStrLn "Not a valid option"
-process fn (UnsetOpt _) = iputStrLn "Not a valid option"
+process fn (SetOpt   ErrContext) = do setErrContext True; return []
+process fn (UnsetOpt ErrContext) = do setErrContext False; return []
+process fn (SetOpt ShowImpl)     = do setImpShow True; return []
+process fn (UnsetOpt ShowImpl)   = do setImpShow False; return []
 
+process fn (SetOpt _) = do return ["Not a valid option"]
+process fn (UnsetOpt _) = do return ["Not a valid option"]
 
-classInfo :: ClassInfo -> Idris ()
-classInfo ci = do iputStrLn "Methods:\n"
-                  mapM_ dumpMethod (class_methods ci)
-                  iputStrLn ""
-                  iputStrLn "Instances:\n"
-                  mapM_ dumpInstance (class_instances ci)
+classInfo :: ClassInfo -> Idris ([String])
+classInfo ci = do let out = "Methods:\n" : (map dumpMethod (class_methods ci)) ++ ["", "Instances:\n"]
+                  ins <- mapM dumpInstance (class_instances ci)
+                  return (out ++ (concat ins))
 
-dumpMethod :: (Name, (FnOpts, PTerm)) -> Idris ()
-dumpMethod (n, (_, t)) = iputStrLn $ show n ++ " : " ++ show t
+dumpMethod :: (Name, (FnOpts, PTerm)) -> String
+dumpMethod (n, (_, t)) = show n ++ " : " ++ show t
 
-dumpInstance :: Name -> Idris ()
+dumpInstance :: Name -> Idris ([String])
 dumpInstance n = do i <- getIState
                     ctxt <- getContext
                     imp <- impShow
                     case lookupTy n ctxt of
-                         ts -> mapM_ (\t -> iputStrLn $ showImp imp (delab i t)) ts
+                         ts -> return (mapM (\t -> showImp imp (delab i t)) ts)
 
 showTotal t@(Partial (Other ns)) i
    = show t ++ "\n\t" ++ showSep "\n\t" (map (showTotalN i) ns)
@@ -587,10 +587,14 @@ idrisMain opts =
        ok <- noErrors
        when ok $ case output of
                     [] -> return ()
-                    (o:_) -> process "" (Compile tgt o)  
+                    (o:_) ->
+                      do xs <- process "" (Compile tgt o)
+                         mapM_ iputStrLn xs
        when ok $ case newoutput of
                     [] -> return ()
-                    (o:_) -> process "" (NewCompile o)  
+                    (o:_) ->
+                      do xs <- process "" (NewCompile o)
+                         mapM_ iputStrLn xs
        when (runrepl && not idesl) $ runInputT replSettings $ repl ist inputs
        when (idesl) $ ideslave ist inputs
        ok <- noErrors
